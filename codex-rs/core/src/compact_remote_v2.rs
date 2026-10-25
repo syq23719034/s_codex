@@ -16,6 +16,7 @@ use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
 use crate::compact_remote_history::HistoryItemGroup;
 use crate::compact_remote_history::history_item_groups;
+use crate::context::retained_goal_context_text;
 use crate::context::world_state::WorldState;
 use crate::context_manager::estimate_item_token_count;
 use crate::hook_runtime::PostCompactHookOutcome;
@@ -89,6 +90,10 @@ const MAX_RETAINED_AGENT_MESSAGE_TOKENS: i64 = 10_000;
 // Compact attempts can run much longer than normal turns, so keep the per-transport
 // retry budget smaller than the general Responses stream retry budget.
 const MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES: u64 = 2;
+
+#[cfg(test)]
+#[path = "compact_remote_v2_goal_tests.rs"]
+mod goal_context_tests;
 
 #[derive(Clone, Copy)]
 enum CompactionRequestKind<'a> {
@@ -565,10 +570,13 @@ fn is_retained_for_remote_compaction_v2(
     };
 
     match role.as_str() {
-        "user" => matches!(
-            crate::event_mapping::parse_turn_item(item),
-            Some(TurnItem::UserMessage(_) | TurnItem::HookPrompt(_))
-        ),
+        "user" => {
+            retained_goal_context_text(item).is_some()
+                || matches!(
+                    crate::event_mapping::parse_turn_item(item),
+                    Some(TurnItem::UserMessage(_) | TurnItem::HookPrompt(_))
+                )
+        }
         "developer" => {
             features.enabled(Feature::RetainClientDeveloperMessages)
                 && is_client_authored_developer_message(envelope)
@@ -644,8 +652,10 @@ fn truncate_retained_messages(
             }
             truncated_reversed.push(group.source);
             remaining = remaining.saturating_sub(token_count);
-        } else if is_retained_tool_output(&group.source) {
-            // Keep outputs whole and stop before older items to preserve newest-first ordering.
+        } else if is_retained_tool_output(&group.source)
+            || retained_goal_context_text(&group.source.item).is_some()
+        {
+            // Keep outputs and goals whole. Stop before older instructions to preserve ordering.
             break;
         } else if remaining > notice_tokens {
             let available_tokens = remaining - notice_tokens;

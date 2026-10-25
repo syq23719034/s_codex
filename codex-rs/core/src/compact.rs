@@ -9,6 +9,7 @@ use crate::client_common::ResponseEvent;
 use crate::context::BaseInstructionsFragment;
 use crate::context::CompactionSummary;
 use crate::context::ContextualUserFragment;
+use crate::context::retained_goal_context_text;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context::world_state::split_prefix_updates;
@@ -61,6 +62,10 @@ use tracing::error;
 pub use codex_prompts::SUMMARIZATION_PROMPT;
 pub use codex_prompts::SUMMARY_PREFIX;
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
+
+#[cfg(test)]
+#[path = "compact_goal_context_tests.rs"]
+mod goal_context_tests;
 
 /// Thread-local policy that preserves inherited context without changing model or skill budgets.
 /// Insert into `StartThreadOptions::thread_extension_init` to disable automatic compaction.
@@ -600,10 +605,14 @@ fn compacted_user_message<'a>(
     item: &'a ResponseItem,
     harness_metadata: Option<&'a CodexHarnessMetadata>,
 ) -> Option<CompactedUserMessage<'a>> {
-    let Some(TurnItem::UserMessage(user)) = crate::event_mapping::parse_turn_item(item) else {
-        return None;
+    let message = if let Some(text) = retained_goal_context_text(item) {
+        text.to_owned()
+    } else {
+        let Some(TurnItem::UserMessage(user)) = crate::event_mapping::parse_turn_item(item) else {
+            return None;
+        };
+        user.message()
     };
-    let message = user.message();
     if is_summary_message(&message) {
         return None;
     }
@@ -721,6 +730,11 @@ fn build_compacted_history_with_limit(
                 break;
             }
             let tokens = approx_token_count(&message.message);
+            if tokens > remaining && retained_goal_context_text(message.original).is_some() {
+                // Keep goals whole: truncation can change restrictions or break the
+                // hidden wrapper. Do not backfill the budget with older instructions.
+                break;
+            }
             let ResponseItem::Message {
                 id,
                 content,

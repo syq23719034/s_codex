@@ -1,8 +1,10 @@
 //! Hidden user-context fragment for extension-owned model steering.
 
 use super::ContextualUserFragment;
+use super::UserGoalUpdate;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::models::input_text;
 use std::error::Error;
 use std::fmt;
@@ -124,6 +126,27 @@ impl ContextualUserFragment for InternalModelContextFragment {
 fn matches_legacy_goal_context(text: &str) -> bool {
     text.starts_with(LEGACY_GOAL_CONTEXT_START_MARKER)
         && text.ends_with(LEGACY_GOAL_CONTEXT_END_MARKER)
+}
+
+/// Goal steering cannot be reconstructed from the canonical session prefix.
+/// Retain it separately from visible messages, together with explicit user goal
+/// edits so a later pause or clear cannot disappear while older steering survives.
+/// This is a retention decision only; visibility and authorization are unchanged.
+pub(crate) fn retained_goal_context_text(item: &ResponseItem) -> Option<&str> {
+    if let Some(text) = UserGoalUpdate::message_text(item) {
+        return Some(text);
+    }
+    let ResponseItem::Message { role, content, .. } = item else {
+        return None;
+    };
+    let [ContentItem::InputText { text }] = content.as_slice() else {
+        return None;
+    };
+    let trimmed = text.trim();
+    let is_goal = matches_legacy_goal_context(trimmed)
+        || (trimmed.starts_with("<codex_internal_context source=\"goal\">")
+            && InternalModelContextFragment::matches_text(trimmed));
+    (role == "user" && is_goal).then_some(text)
 }
 
 fn is_valid_source(source: &str) -> bool {
